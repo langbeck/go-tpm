@@ -2080,3 +2080,87 @@ func TestDictionaryAttackLockReset(t *testing.T) {
 		t.Fatalf("got %d, expected 0", caps[0].(TaggedProperty).Value)
 	}
 }
+
+func TestNVUndefineSpaceSpecial(t *testing.T) {
+	rw := openTPM(t)
+	defer rw.Close()
+
+	// Set up policy session for creation (Trail session)
+	sess, _, err := StartAuthSession(rw, HandleNull, HandleNull, make([]byte, 16), nil, SessionTrial, AlgNull, AlgSHA256)
+	if err != nil {
+		t.Errorf("StartAuthSession() for policy generation failed: %v", err)
+	}
+	// Use well known SHA256 values to generate a known policy.
+	hashVal := make([]byte, 32)
+	for iterator := range hashVal {
+		hashVal[iterator] = byte(iterator)
+	}
+	// Use well known hash for policy generation with PolicyOr
+	err = PolicyOr(rw, sess, TPMLDigest{Digests: []tpmutil.U16Bytes{tpmutil.U16Bytes(hashVal), tpmutil.U16Bytes(hashVal)}})
+	if err != nil {
+		t.Errorf("PolicyOr() for policy generation failed: %v", err)
+	}
+
+	// Use PolicyCommandCode(rw, sess, CmdNVUndefineSpaceSpecial) to manipulate the session
+	err = PolicyCommandCode(rw, sess, CmdNVUndefineSpaceSpecial)
+	if err != nil {
+		t.Errorf("PolicyCommandCode() failed: %v", err)
+	}
+	// Read policy for NVDefineSpace
+	pol, err := PolicyGetDigest(rw, sess)
+	if err != nil {
+		t.Errorf("PolicyGetDigest() failed: %v", err)
+	}
+	// Close trail session
+	err = FlushContext(rw, sess)
+
+	// Test index with
+	pubIndex := NVPublic{
+		NVIndex:    0x1500000,
+		NameAlg:    AlgSHA256,
+		Attributes: AttrPlatformCreate | AttrPolicyDelete | AttrPolicyWrite | AttrNoDA | AttrAuthRead,
+		AuthPolicy: pol,
+		DataSize:   10,
+	}
+	// AuthCommand for platform hierarchy
+	platformAuthCmd := AuthCommand{
+		Session:    HandlePasswordSession,
+		Attributes: AttrContinueSession,
+		Auth:       EmptyAuth,
+	}
+
+	// Create the index
+	err = NVDefineSpaceEx(rw, HandlePlatform, "", pubIndex, platformAuthCmd)
+	if err != nil {
+		t.Errorf("NVDefineSpaceEx() failed: %v", err)
+	}
+
+	// Start new auth session for authentication of nv index access
+	sess, _, err = StartAuthSession(rw, HandleNull, HandleNull, make([]byte, 16), nil, SessionPolicy, AlgNull, AlgSHA256)
+	if err != nil {
+		t.Errorf("StartAuthSession() for nv index auth failed: %v", err)
+	}
+	// Use PolicyOr to manipulate the session with well known hash values
+	err = PolicyOr(rw, sess, TPMLDigest{Digests: []tpmutil.U16Bytes{tpmutil.U16Bytes(hashVal), tpmutil.U16Bytes(hashVal)}})
+	if err != nil {
+		t.Errorf("PolicyOr() for nv index auth failed: %v", err)
+	}
+	// Use PolicyCommandCode(rw, sess, CmdNVUndefineSpaceSpecial) to gain access to NVUndefineSpaceSpecial
+	err = PolicyCommandCode(rw, sess, CmdNVUndefineSpaceSpecial)
+	if err != nil {
+		t.Errorf("PolicyCommandCode() or nv index auth failed: %v", err)
+	}
+	//
+	// indexAuthCmd for nv index authorization
+	indexAuthCmd := AuthCommand{
+		Session:    sess,
+		Attributes: AttrContinueSession,
+		Auth:       EmptyAuth,
+	}
+	// Delete the index
+	err = NVUndefineSpaceSpecial(rw, pubIndex.NVIndex, indexAuthCmd, platformAuthCmd)
+	if err != nil {
+		t.Errorf("NVUndefineSpaceSpecial() failed: %v", err)
+	}
+
+}
